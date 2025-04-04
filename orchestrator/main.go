@@ -11,21 +11,18 @@ import (
 	"time"
 )
 
-// Service URLs
 const (
 	OrderServiceURL    = "http://localhost:8081"
 	PaymentServiceURL  = "http://localhost:8082"
 	ShippingServiceURL = "http://localhost:8083"
 )
 
-// Transaction status constants
 const (
 	TransactionStatusPending   = "PENDING"
 	TransactionStatusCompleted = "COMPLETED"
 	TransactionStatusFailed    = "FAILED"
 )
 
-// Transaction represents a saga transaction
 type Transaction struct {
 	ID            string    `json:"id"`
 	OrderID       string    `json:"order_id"`
@@ -39,7 +36,6 @@ type Transaction struct {
 	Steps         []Step    `json:"steps"`
 }
 
-// Step represents a step in the saga transaction
 type Step struct {
 	Name      string    `json:"name"`
 	Status    string    `json:"status"`
@@ -48,7 +44,6 @@ type Step struct {
 	Error     string    `json:"error,omitempty"`
 }
 
-// CreateOrderRequest represents the request to create an order
 type CreateOrderRequest struct {
 	CustomerID string  `json:"customer_id"`
 	Items      []Item  `json:"items"`
@@ -56,7 +51,6 @@ type CreateOrderRequest struct {
 	Address    string  `json:"address"`
 }
 
-// Item represents an item in an order
 type Item struct {
 	ID       string  `json:"id"`
 	Name     string  `json:"name"`
@@ -64,7 +58,6 @@ type Item struct {
 	Quantity int     `json:"quantity"`
 }
 
-// OrderResponse represents the response from the order service
 type OrderResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
@@ -72,7 +65,6 @@ type OrderResponse struct {
 	Status  string `json:"status,omitempty"`
 }
 
-// PaymentResponse represents the response from the payment service
 type PaymentResponse struct {
 	Success   bool   `json:"success"`
 	Message   string `json:"message"`
@@ -81,7 +73,6 @@ type PaymentResponse struct {
 	Status    string `json:"status,omitempty"`
 }
 
-// ShippingResponse represents the response from the shipping service
 type ShippingResponse struct {
 	Success    bool   `json:"success"`
 	Message    string `json:"message"`
@@ -90,14 +81,12 @@ type ShippingResponse struct {
 	Status     string `json:"status,omitempty"`
 }
 
-// TransactionResponse represents the response for transaction operations
 type TransactionResponse struct {
 	Success     bool        `json:"success"`
 	Message     string      `json:"message"`
 	Transaction Transaction `json:"transaction,omitempty"`
 }
 
-// In-memory storage for transactions
 var (
 	transactions = make(map[string]Transaction)
 	mu           sync.Mutex
@@ -105,30 +94,25 @@ var (
 )
 
 func main() {
-	// Define API endpoints
 	http.HandleFunc("/create-order-saga", createOrderSagaHandler)
 	http.HandleFunc("/transaction-status", transactionStatusHandler)
 
-	// Start the server
 	fmt.Println("Saga Orchestrator started on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
 func createOrderSagaHandler(w http.ResponseWriter, r *http.Request) {
-	// Only accept POST requests
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Parse request body
 	var req CreateOrderRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
-	// Validate request
 	if req.CustomerID == "" {
 		http.Error(w, "Customer ID is required", http.StatusBadRequest)
 		return
@@ -142,7 +126,6 @@ func createOrderSagaHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create a new transaction
 	mu.Lock()
 	transactionID := fmt.Sprintf("TRX-%d", nextID)
 	nextID++
@@ -159,10 +142,8 @@ func createOrderSagaHandler(w http.ResponseWriter, r *http.Request) {
 	transactions[transactionID] = transaction
 	mu.Unlock()
 
-	// Execute the saga
 	go executeSaga(transactionID, req)
 
-	// Return response
 	resp := TransactionResponse{
 		Success:     true,
 		Message:     "Transaction initiated successfully",
@@ -177,20 +158,17 @@ func createOrderSagaHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func transactionStatusHandler(w http.ResponseWriter, r *http.Request) {
-	// Only accept GET requests
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Get transaction ID from query parameters
 	transactionID := r.URL.Query().Get("transaction_id")
 	if transactionID == "" {
 		http.Error(w, "Transaction ID is required", http.StatusBadRequest)
 		return
 	}
 
-	// Check if transaction exists
 	mu.Lock()
 	transaction, exists := transactions[transactionID]
 	mu.Unlock()
@@ -199,7 +177,6 @@ func transactionStatusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return transaction status
 	resp := TransactionResponse{
 		Success:     true,
 		Transaction: transaction,
@@ -210,49 +187,39 @@ func transactionStatusHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func executeSaga(transactionID string, req CreateOrderRequest) {
-	// Step 1: Create Order
 	orderID, err := createOrder(transactionID, req)
 	if err != nil {
 		updateTransactionStatus(transactionID, TransactionStatusFailed, fmt.Sprintf("Failed to create order: %v", err))
 		return
 	}
 
-	// Update transaction with order ID
 	mu.Lock()
 	transaction := transactions[transactionID]
 	transaction.OrderID = orderID
 	transactions[transactionID] = transaction
 	mu.Unlock()
 
-	// Step 2: Process Payment
 	err = processPayment(transactionID, orderID, req.Amount)
 	if err != nil {
-		// Compensation: Cancel Order
 		cancelOrder(transactionID, orderID)
 		updateTransactionStatus(transactionID, TransactionStatusFailed, fmt.Sprintf("Failed to process payment: %v", err))
 		return
 	}
 
-	// Step 3: Start Shipping
 	err = startShipping(transactionID, orderID, req.Address)
 	if err != nil {
-		// Compensation: Refund Payment
 		refundPayment(transactionID, orderID)
-		// Compensation: Cancel Order
 		cancelOrder(transactionID, orderID)
 		updateTransactionStatus(transactionID, TransactionStatusFailed, fmt.Sprintf("Failed to start shipping: %v", err))
 		return
 	}
 
-	// All steps completed successfully
 	updateTransactionStatus(transactionID, TransactionStatusCompleted, "")
 }
 
 func createOrder(transactionID string, req CreateOrderRequest) (string, error) {
-	// Add step to transaction
 	addStep(transactionID, "CREATE_ORDER")
 
-	// Prepare request body
 	orderReq := map[string]interface{}{
 		"customer_id": req.CustomerID,
 		"items":       req.Items,
@@ -264,7 +231,6 @@ func createOrder(transactionID string, req CreateOrderRequest) (string, error) {
 		return "", err
 	}
 
-	// Send request to order service
 	resp, err := http.Post(OrderServiceURL+"/create-order", "application/json", bytes.NewBuffer(reqBody))
 	if err != nil {
 		updateStepStatus(transactionID, "CREATE_ORDER", false, err.Error())
@@ -272,27 +238,23 @@ func createOrder(transactionID string, req CreateOrderRequest) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	// Read response body
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		updateStepStatus(transactionID, "CREATE_ORDER", false, err.Error())
 		return "", err
 	}
 
-	// Parse response
 	var orderResp OrderResponse
 	if err := json.Unmarshal(body, &orderResp); err != nil {
 		updateStepStatus(transactionID, "CREATE_ORDER", false, err.Error())
 		return "", err
 	}
 
-	// Check if order creation was successful
 	if !orderResp.Success {
 		updateStepStatus(transactionID, "CREATE_ORDER", false, orderResp.Message)
 		return "", fmt.Errorf(orderResp.Message)
 	}
 
-	// Update step status
 	updateStepStatus(transactionID, "CREATE_ORDER", true, "")
 
 	fmt.Printf("Order created: %s\n", orderResp.OrderID)
@@ -300,10 +262,8 @@ func createOrder(transactionID string, req CreateOrderRequest) (string, error) {
 }
 
 func processPayment(transactionID, orderID string, amount float64) error {
-	// Add step to transaction
 	addStep(transactionID, "PROCESS_PAYMENT")
 
-	// Prepare request body
 	paymentReq := map[string]interface{}{
 		"order_id": orderID,
 		"amount":   amount,
@@ -314,7 +274,6 @@ func processPayment(transactionID, orderID string, amount float64) error {
 		return err
 	}
 
-	// Send request to payment service
 	resp, err := http.Post(PaymentServiceURL+"/process-payment", "application/json", bytes.NewBuffer(reqBody))
 	if err != nil {
 		updateStepStatus(transactionID, "PROCESS_PAYMENT", false, err.Error())
@@ -322,27 +281,23 @@ func processPayment(transactionID, orderID string, amount float64) error {
 	}
 	defer resp.Body.Close()
 
-	// Read response body
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		updateStepStatus(transactionID, "PROCESS_PAYMENT", false, err.Error())
 		return err
 	}
 
-	// Parse response
 	var paymentResp PaymentResponse
 	if err := json.Unmarshal(body, &paymentResp); err != nil {
 		updateStepStatus(transactionID, "PROCESS_PAYMENT", false, err.Error())
 		return err
 	}
 
-	// Check if payment processing was successful
 	if !paymentResp.Success {
 		updateStepStatus(transactionID, "PROCESS_PAYMENT", false, paymentResp.Message)
 		return fmt.Errorf(paymentResp.Message)
 	}
 
-	// Update step status
 	updateStepStatus(transactionID, "PROCESS_PAYMENT", true, "")
 
 	fmt.Printf("Payment processed for order: %s\n", orderID)
@@ -350,10 +305,8 @@ func processPayment(transactionID, orderID string, amount float64) error {
 }
 
 func startShipping(transactionID, orderID, address string) error {
-	// Add step to transaction
 	addStep(transactionID, "START_SHIPPING")
 
-	// Prepare request body
 	shippingReq := map[string]interface{}{
 		"order_id": orderID,
 		"address":  address,
@@ -364,7 +317,6 @@ func startShipping(transactionID, orderID, address string) error {
 		return err
 	}
 
-	// Send request to shipping service
 	resp, err := http.Post(ShippingServiceURL+"/start-shipping", "application/json", bytes.NewBuffer(reqBody))
 	if err != nil {
 		updateStepStatus(transactionID, "START_SHIPPING", false, err.Error())
@@ -372,27 +324,23 @@ func startShipping(transactionID, orderID, address string) error {
 	}
 	defer resp.Body.Close()
 
-	// Read response body
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		updateStepStatus(transactionID, "START_SHIPPING", false, err.Error())
 		return err
 	}
 
-	// Parse response
 	var shippingResp ShippingResponse
 	if err := json.Unmarshal(body, &shippingResp); err != nil {
 		updateStepStatus(transactionID, "START_SHIPPING", false, err.Error())
 		return err
 	}
 
-	// Check if shipping initiation was successful
 	if !shippingResp.Success {
 		updateStepStatus(transactionID, "START_SHIPPING", false, shippingResp.Message)
 		return fmt.Errorf(shippingResp.Message)
 	}
 
-	// Update step status
 	updateStepStatus(transactionID, "START_SHIPPING", true, "")
 
 	fmt.Printf("Shipping initiated for order: %s\n", orderID)
@@ -400,10 +348,8 @@ func startShipping(transactionID, orderID, address string) error {
 }
 
 func cancelOrder(transactionID, orderID string) {
-	// Add step to transaction
 	addStep(transactionID, "CANCEL_ORDER")
 
-	// Prepare request body
 	cancelReq := map[string]interface{}{
 		"order_id": orderID,
 	}
@@ -413,7 +359,6 @@ func cancelOrder(transactionID, orderID string) {
 		return
 	}
 
-	// Send request to order service
 	resp, err := http.Post(OrderServiceURL+"/cancel-order", "application/json", bytes.NewBuffer(reqBody))
 	if err != nil {
 		updateStepStatus(transactionID, "CANCEL_ORDER", false, err.Error())
@@ -421,17 +366,14 @@ func cancelOrder(transactionID, orderID string) {
 	}
 	defer resp.Body.Close()
 
-	// Update step status
 	updateStepStatus(transactionID, "CANCEL_ORDER", true, "")
 
 	fmt.Printf("Order cancelled: %s\n", orderID)
 }
 
 func refundPayment(transactionID, orderID string) {
-	// Add step to transaction
 	addStep(transactionID, "REFUND_PAYMENT")
 
-	// Prepare request body
 	refundReq := map[string]interface{}{
 		"order_id": orderID,
 	}
@@ -441,7 +383,6 @@ func refundPayment(transactionID, orderID string) {
 		return
 	}
 
-	// Send request to payment service
 	resp, err := http.Post(PaymentServiceURL+"/refund-payment", "application/json", bytes.NewBuffer(reqBody))
 	if err != nil {
 		updateStepStatus(transactionID, "REFUND_PAYMENT", false, err.Error())
@@ -449,17 +390,14 @@ func refundPayment(transactionID, orderID string) {
 	}
 	defer resp.Body.Close()
 
-	// Update step status
 	updateStepStatus(transactionID, "REFUND_PAYMENT", true, "")
 
 	fmt.Printf("Payment refunded for order: %s\n", orderID)
 }
 
 func cancelShipping(transactionID, orderID string) {
-	// Add step to transaction
 	addStep(transactionID, "CANCEL_SHIPPING")
 
-	// Prepare request body
 	cancelReq := map[string]interface{}{
 		"order_id": orderID,
 	}
@@ -469,7 +407,6 @@ func cancelShipping(transactionID, orderID string) {
 		return
 	}
 
-	// Send request to shipping service
 	resp, err := http.Post(ShippingServiceURL+"/cancel-shipping", "application/json", bytes.NewBuffer(reqBody))
 	if err != nil {
 		updateStepStatus(transactionID, "CANCEL_SHIPPING", false, err.Error())
@@ -477,7 +414,6 @@ func cancelShipping(transactionID, orderID string) {
 	}
 	defer resp.Body.Close()
 
-	// Update step status
 	updateStepStatus(transactionID, "CANCEL_SHIPPING", true, "")
 
 	fmt.Printf("Shipping cancelled for order: %s\n", orderID)
